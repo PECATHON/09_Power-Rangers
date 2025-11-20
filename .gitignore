@@ -37,3 +37,6 @@ output/
 output_json/
 runs/
 test-imgs/
+
+# Weights 
+*.pt
