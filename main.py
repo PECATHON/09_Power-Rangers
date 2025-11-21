@@ -84,7 +84,7 @@ except ImportError:
 # --- Configuration ---
 MODEL_PATH = os.getenv(
     "YOLO_MODEL_PATH",
-    r"E:\My folder\codes\pecfest\PEC-Hackathon\yolov8x-doclaynet-epoch64-imgsz640-initiallr1e-4-finallr1e-5.pt"
+    r"yolov8x-doclaynet-epoch64-imgsz640-initiallr1e-4-finallr1e-5.pt"
 )
 MAX_IMAGE_DIMENSION = 4096
 
