@@ -5,19 +5,13 @@ from typing import List, Dict, Any, Optional
 import json
 from contextlib import asynccontextmanager
 import base64
-
+from summary import summarize_pdf
 import requests
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import numpy as np
 import torch
-
-import asyncio
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-
-# Add this near the top with other globals
-executor = ThreadPoolExecutor(max_workers=2)
 
 # CRITICAL FIX: Patch torch.load to allow loading custom YOLO models
 # This must happen BEFORE importing ultralytics
@@ -90,7 +84,7 @@ except ImportError:
 # --- Configuration ---
 MODEL_PATH = os.getenv(
     "YOLO_MODEL_PATH",
-    r"yolov8x-doclaynet-epoch64-imgsz640-initiallr1e-4-finallr1e-5.pt"
+    r"E:\My folder\codes\pecfest\PEC-Hackathon\yolov8x-doclaynet-epoch64-imgsz640-initiallr1e-4-finallr1e-5.pt"
 )
 MAX_IMAGE_DIMENSION = 4096
 
@@ -291,10 +285,10 @@ table_extractor = TableExtractor() if HAS_OCR_DEPS else None
 
 
 # --- Chart Analysis with OneChart ---
-def analyze_chart(pil_image: Image.Image, timeout: int = 30) -> Dict[str, Any]:
-    """Analyze chart using OneChart model with timeout."""
+def analyze_chart(pil_image: Image.Image) -> Dict[str, Any]:
+    """Analyze chart using OneChart model."""
     if not onechart_model or not onechart_tokenizer:
-        return {"error": "OneChart model not available", "status": "skipped"}
+        return {"error": "OneChart model not available"}
     
     try:
         # Save image temporarily for OneChart
@@ -303,45 +297,11 @@ def analyze_chart(pil_image: Image.Image, timeout: int = 30) -> Dict[str, Any]:
             tmp_path = tmp_file.name
         
         try:
-            print(f"    ... Running OneChart analysis (timeout: {timeout}s) ...")
-            
-            # Clear CUDA cache before running
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            # Wrap the model call to catch CUDA errors
-            def run_inference():
-                try:
-                    with torch.no_grad():  # Disable gradients for inference
-                        return onechart_model.chat(onechart_tokenizer, tmp_path)
-                except RuntimeError as e:
-                    if "CUDA" in str(e):
-                        print(f"    ... CUDA error detected, retrying on CPU ...")
-                        # Move model to CPU temporarily
-                        device = next(onechart_model.parameters()).device
-                        onechart_model.to('cpu')
-                        try:
-                            result = onechart_model.chat(onechart_tokenizer, tmp_path)
-                            onechart_model.to(device)  # Move back to original device
-                            return result
-                        except:
-                            onechart_model.to(device)
-                            raise
-                    raise
-            
-            # Run with timeout
-            future = executor.submit(run_inference)
-            result = future.result(timeout=timeout)
-            
+            # Run OneChart analysis
+            result = onechart_model.chat(onechart_tokenizer, tmp_path)
             return {
                 "analysis": result,
                 "status": "success"
-            }
-        except FuturesTimeoutError:
-            print(f"    ... OneChart analysis timed out after {timeout}s ...")
-            return {
-                "error": f"Analysis timed out after {timeout} seconds",
-                "status": "timeout"
             }
         finally:
             # Clean up temp file
@@ -408,7 +368,7 @@ def run_yolo_detection(image: Image.Image) -> List[Dict[str, Any]]:
 
 
 # --- Core Processing Logic ---
-async def process_image_and_route(image: Image.Image, page_num: int, analyze_charts: bool = True) -> Dict[str, Any]:
+async def process_image_and_route(image: Image.Image, page_num: int) -> Dict[str, Any]:
     """Runs detection, extracts data if table, analyzes charts, and returns all results."""
     
     # Resize if needed to prevent memory issues
@@ -460,10 +420,14 @@ async def process_image_and_route(image: Image.Image, page_num: int, analyze_cha
                 })
                     
             elif "image" in class_name or "chart" in class_name or "figure" in class_name or "picture" in class_name:
+                # Analyze chart with OneChart
+                print(f"    ... Analyzing Chart #{len(charts) + 1} in Page {page_num} ...")
+                chart_analysis = analyze_chart(cropped)
+                
                 # Convert cropped image to base64 for frontend
                 img_base64 = image_to_base64(cropped)
                 
-                chart_data = {
+                charts.append({
                     "page": page_num,
                     "bounding_box": {
                         "x1": box[0],
@@ -472,19 +436,10 @@ async def process_image_and_route(image: Image.Image, page_num: int, analyze_cha
                         "y2": box[3]
                     },
                     "confidence": confidence,
+                    "analysis": chart_analysis,
                     "image": img_base64,
                     "type": class_name
-                }
-                
-                # Only analyze if requested
-                if analyze_charts and onechart_model:
-                    print(f"    ... Analyzing Chart #{len(charts) + 1} in Page {page_num} ...")
-                    chart_analysis = analyze_chart(cropped, timeout=30)
-                    chart_data["analysis"] = chart_analysis
-                else:
-                    chart_data["analysis"] = {"status": "skipped", "reason": "Chart analysis disabled"}
-                
-                charts.append(chart_data)
+                })
                     
         except Exception as e:
             print(f"Error processing detection on page {page_num}: {str(e)}")
@@ -515,10 +470,7 @@ async def health_check():
 
 
 @app.post("/upload_and_process/")
-async def upload_and_process(
-    file: UploadFile = File(...),
-    analyze_charts: bool = True  # Add this parameter
-):
+async def upload_and_process(file: UploadFile = File(...)):
     """Process uploaded PDF or image file and return all extracted data."""
     
     # Validate file type
@@ -549,14 +501,14 @@ async def upload_and_process(
                 page_num = i + 1
                 print(f"\nProcessing page {page_num}/{len(images)}...")
                 
-                results = await process_image_and_route(image, page_num, analyze_charts)
+                results = await process_image_and_route(image, page_num)
                 all_results.append(results)
     
     # Handle Single Image
     else:
         try:
             image = Image.open(io.BytesIO(file_bytes))
-            results = await process_image_and_route(image, 1, analyze_charts)
+            results = await process_image_and_route(image, 1)
             all_results.append(results)
         except IOError as e:
             raise HTTPException(400, f"Invalid image file: {e}")
@@ -575,6 +527,10 @@ async def upload_and_process(
         },
         "results": all_results
     }
+@app.post("/summary")
+async def summary(file: UploadFile = File(...)):
+    summary_value = await summarize_pdf(file)
+    return {"summary": summary_value}
 
 
 if __name__ == "__main__":
